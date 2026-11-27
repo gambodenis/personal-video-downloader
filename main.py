@@ -16,17 +16,17 @@ import yt_dlp
 
 APP_NAME = "VideoDownloader"
 COLORS = {
-    "background": "#0E1411",
-    "surface": "#161F1A",
-    "surface_light": "#1F2B24",
-    "row_alt": "#1A241E",
-    "border": "#2E3D34",
-    "text": "#F1F4EB",
-    "muted": "#8E9C90",
-    "accent": "#C8F169",
-    "accent_hover": "#D8FF8D",
-    "accent_dark": "#2C4220",
-    "danger": "#FF8A7A",
+    "background": "#F4F6F9",
+    "surface": "#FFFFFF",
+    "surface_light": "#EDF2F7",
+    "row_alt": "#F7F9FC",
+    "border": "#DCE3EB",
+    "text": "#24364B",
+    "muted": "#718096",
+    "accent": "#1267F1",
+    "accent_hover": "#2878F5",
+    "accent_dark": "#DCEAFF",
+    "danger": "#D64545",
 }
 BROWSERS = {
     "Aucune": None,
@@ -323,10 +323,10 @@ class VideoDownloaderApp:
         self.root.title("Video Desk — Téléchargeur vidéo")
         self.scale = max(1.0, root.winfo_fpixels("1i") / 96)
         screen_w, screen_h = root.winfo_screenwidth(), root.winfo_screenheight()
-        width = min(self._px(1020), screen_w - self._px(40))
-        height = min(self._px(740), screen_h - self._px(90))
-        self.root.minsize(min(self._px(820), width), min(self._px(560), height))
-        top = max(0, (screen_h - height) // 2 - self._px(30))
+        width = min(self._px(1280), screen_w - self._px(40))
+        height = min(self._px(820), screen_h - self._px(60))
+        self.root.minsize(min(self._px(900), width), min(self._px(650), height))
+        top = max(0, (screen_h - height) // 2)
         self.root.geometry(f"{width}x{height}+{(screen_w - width) // 2}+{top}")
 
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
@@ -351,6 +351,7 @@ class VideoDownloaderApp:
         self.meta_var = StringVar(value="Collez un lien puis cliquez sur « Analyser » (ou Entrée).")
         self.status_var = StringVar(value="Prêt.")
         self.progress_var = StringVar(value="")
+        self.jobs_count_var = StringVar(value="Aucun téléchargement")
 
         self._configure_theme()
         self._build_ui()
@@ -365,10 +366,10 @@ class VideoDownloaderApp:
     def _configure_theme(self) -> None:
         c = COLORS
         self.root.configure(bg=c["background"])
-        self.root.option_add("*TCombobox*Listbox.background", c["surface_light"])
+        self.root.option_add("*TCombobox*Listbox.background", c["surface"])
         self.root.option_add("*TCombobox*Listbox.foreground", c["text"])
-        self.root.option_add("*TCombobox*Listbox.selectBackground", c["accent_dark"])
-        self.root.option_add("*TCombobox*Listbox.selectForeground", c["accent"])
+        self.root.option_add("*TCombobox*Listbox.selectBackground", c["accent"])
+        self.root.option_add("*TCombobox*Listbox.selectForeground", "#FFFFFF")
         self.root.option_add("*TCombobox*Listbox.font", ("Segoe UI", 10))
 
         style = ttk.Style(self.root)
@@ -376,6 +377,7 @@ class VideoDownloaderApp:
         style.configure(".", background=c["background"], foreground=c["text"], font=("Segoe UI", 10))
         style.configure("App.TFrame", background=c["background"])
         style.configure("Card.TFrame", background=c["surface"])
+        style.configure("Sidebar.TFrame", background=c["surface"])
 
         def label(name: str, bg: str, fg: str, font: tuple) -> None:
             style.configure(name, background=c[bg], foreground=c[fg], font=font)
@@ -388,6 +390,36 @@ class VideoDownloaderApp:
         label("Warn.TLabel", "surface", "danger", ("Segoe UI", 9))
         label("Status.TLabel", "surface", "text", ("Segoe UI Semibold", 10))
         label("Progress.TLabel", "surface", "muted", ("Segoe UI", 9))
+        style.configure("Brand.TLabel", background=c["surface"], foreground=c["text"], font=("Segoe UI Semibold", 15))
+        style.configure("BrandMark.TLabel", background=c["accent"], foreground="#FFFFFF", font=("Segoe UI Semibold", 12))
+        style.configure("SidebarHint.TLabel", background=c["surface"], foreground=c["muted"], font=("Segoe UI", 9))
+        style.configure("SidebarCount.TLabel", background=c["surface"], foreground=c["accent"], font=("Segoe UI Semibold", 9))
+        style.configure(
+            "Nav.TButton",
+            background=c["surface"],
+            foreground=c["muted"],
+            borderwidth=0,
+            focuscolor=c["surface"],
+            anchor="w",
+            padding=(10, 10),
+            font=("Segoe UI", 10),
+        )
+        style.map(
+            "Nav.TButton",
+            background=[("active", c["surface_light"])],
+            foreground=[("active", c["text"])],
+        )
+        style.configure(
+            "NavActive.TButton",
+            background=c["accent_dark"],
+            foreground=c["accent"],
+            borderwidth=0,
+            focuscolor=c["accent_dark"],
+            anchor="w",
+            padding=(10, 10),
+            font=("Segoe UI Semibold", 10),
+        )
+        style.map("NavActive.TButton", background=[("active", c["accent_dark"])])
 
         style.configure(
             "TEntry",
@@ -486,7 +518,7 @@ class VideoDownloaderApp:
             lightcolor=c["border"],
             darkcolor=c["border"],
             borderwidth=1,
-            rowheight=self._px(34),
+            rowheight=self._px(30),
             font=("Segoe UI", 10),
         )
         style.configure(
@@ -552,32 +584,67 @@ class VideoDownloaderApp:
     # ---------------------------------------------------------------- layout
     def _build_ui(self) -> None:
         px = self._px
-        container = ttk.Frame(self.root, padding=(px(24), px(16)), style="App.TFrame")
-        container.pack(fill="both", expand=True)
+        shell = ttk.Frame(self.root, style="App.TFrame")
+        shell.pack(fill="both", expand=True)
+        shell.columnconfigure(1, weight=1)
+        shell.rowconfigure(0, weight=1)
+
+        sidebar = ttk.Frame(shell, width=px(212), padding=(px(16), px(22)), style="Sidebar.TFrame")
+        sidebar.grid(row=0, column=0, sticky="ns")
+        sidebar.grid_propagate(False)
+        brand = ttk.Frame(sidebar, style="Sidebar.TFrame")
+        brand.pack(fill="x", pady=(0, px(30)))
+        ttk.Label(brand, text="▶", style="BrandMark.TLabel", padding=(px(7), px(5))).pack(side="left")
+        ttk.Label(brand, text="Video Desk", style="Brand.TLabel").pack(side="left", padx=(px(9), 0))
+        ttk.Label(sidebar, text="ESPACE VIDÉO", style="Field.TLabel").pack(anchor="w", pady=(0, px(8)))
+        self.search_nav = ttk.Button(
+            sidebar,
+            text="⌕   Nouvelle recherche",
+            style="NavActive.TButton",
+            command=lambda: self.url_entry.focus_set(),
+        )
+        self.search_nav.pack(fill="x", pady=(0, px(4)))
+        self.downloads_nav = ttk.Button(
+            sidebar,
+            text="↓   Téléchargements",
+            style="Nav.TButton",
+            command=lambda: self.jobs_list.focus_set(),
+        )
+        self.downloads_nav.pack(fill="x", pady=(0, px(4)))
+        ttk.Separator(sidebar, orient="horizontal").pack(fill="x", pady=px(16))
+        ttk.Label(sidebar, textvariable=self.jobs_count_var, style="SidebarCount.TLabel").pack(anchor="w")
+        ttk.Label(
+            sidebar,
+            text="Les téléchargements restent actifs pendant l’analyse d’un autre lien.",
+            style="SidebarHint.TLabel",
+            wraplength=px(174),
+            justify="left",
+        ).pack(anchor="w", pady=(px(8), 0))
+        ttk.Button(
+            sidebar,
+            text="📁   Ouvrir le dossier",
+            style="Nav.TButton",
+            command=self.open_output_folder,
+        ).pack(side="bottom", fill="x")
+
+        container = ttk.Frame(shell, padding=(px(22), px(18)), style="App.TFrame")
+        container.grid(row=0, column=1, sticky="nsew")
         container.columnconfigure(0, weight=1)
-        container.rowconfigure(2, weight=1)
+        container.rowconfigure(1, weight=1, minsize=px(300))
 
-        # En-tête
-        header = ttk.Frame(container, style="App.TFrame")
-        header.grid(row=0, column=0, sticky="ew", pady=(0, px(10)))
-        ttk.Label(header, text="VIDEO DESK  /  YOUTUBE", style="Eyebrow.TLabel").pack(anchor="w")
-        ttk.Label(header, text="Téléchargez. À votre façon.", style="Title.TLabel").pack(anchor="w")
-
-        # Carte source : lien, dossier, session
+        # Barre de recherche et préférences de téléchargement
         source = ttk.Frame(container, padding=px(14), style="Card.TFrame")
-        source.grid(row=1, column=0, sticky="ew")
-        source.columnconfigure(1, weight=1)
+        source.grid(row=0, column=0, sticky="ew")
+        source.columnconfigure(0, weight=1)
 
-        ttk.Label(source, text="LIEN", style="Field.TLabel").grid(row=0, column=0, sticky="w", padx=(0, px(12)))
         self.url_entry = ttk.Entry(source, textvariable=self.url_var, font=("Segoe UI", 10))
-        self.url_entry.grid(row=0, column=1, sticky="ew", padx=(0, px(8)))
+        self.url_entry.grid(row=0, column=0, sticky="ew", padx=(0, px(8)))
         self.url_entry.bind("<Return>", lambda _e: self.fetch_formats())
-        self.fetch_button = ttk.Button(source, text="Analyser  →", style="Accent.TButton", command=self.fetch_formats)
-        self.fetch_button.grid(row=0, column=2, sticky="ew")
+        self.fetch_button = ttk.Button(source, text="Rechercher", style="Accent.TButton", command=self.fetch_formats)
+        self.fetch_button.grid(row=0, column=1, sticky="ew")
 
-        ttk.Label(source, text="DOSSIER", style="Field.TLabel").grid(row=1, column=0, sticky="w", pady=(px(10), 0))
         options_row = ttk.Frame(source, style="Card.TFrame")
-        options_row.grid(row=1, column=1, columnspan=2, sticky="ew", pady=(px(10), 0))
+        options_row.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(px(10), 0))
         options_row.columnconfigure(0, weight=1)
         self.directory_entry = ttk.Entry(options_row, textvariable=self.directory_var, state="readonly")
         self.directory_entry.grid(row=0, column=0, sticky="ew", padx=(0, px(8)))
@@ -592,9 +659,9 @@ class VideoDownloaderApp:
 
         # Carte formats (avec infos vidéo)
         formats_card = ttk.Frame(container, padding=px(14), style="Card.TFrame")
-        formats_card.grid(row=2, column=0, sticky="nsew", pady=(px(10), 0))
+        formats_card.grid(row=1, column=0, sticky="nsew", pady=(px(10), 0))
         formats_card.columnconfigure(0, weight=1)
-        formats_card.rowconfigure(1, weight=1)
+        formats_card.rowconfigure(1, weight=1, minsize=px(190))
 
         top = ttk.Frame(formats_card, style="Card.TFrame")
         top.grid(row=0, column=0, sticky="ew", pady=(0, px(10)))
@@ -618,7 +685,7 @@ class VideoDownloaderApp:
             show="headings",
             selectmode="extended",
             style="Formats.Treeview",
-            height=6,
+            height=5,
         )
         for key, title, width, anchor in COLUMNS:
             self.format_list.heading(key, text=title, anchor=anchor)
@@ -640,7 +707,7 @@ class VideoDownloaderApp:
 
         # Barre d'action : statut, progression, boutons
         action = ttk.Frame(container, padding=(px(14), px(12)), style="Card.TFrame")
-        action.grid(row=4, column=0, sticky="ew", pady=(px(10), 0))
+        action.grid(row=3, column=0, sticky="ew", pady=(px(10), 0))
         action.columnconfigure(0, weight=1)
         ttk.Label(action, textvariable=self.status_var, style="Status.TLabel", wraplength=px(640), justify="left").grid(
             row=0, column=0, sticky="w"
@@ -660,9 +727,8 @@ class VideoDownloaderApp:
         self.download_button.pack(side="left")
 
         jobs_card = ttk.Frame(container, padding=px(14), style="Card.TFrame")
-        jobs_card.grid(row=3, column=0, sticky="ew", pady=(px(10), 0))
+        jobs_card.grid(row=2, column=0, sticky="ew", pady=(px(10), 0))
         jobs_card.columnconfigure(0, weight=1)
-        jobs_card.rowconfigure(1, weight=1)
         ttk.Label(jobs_card, text="TÉLÉCHARGEMENTS", style="Field.TLabel").grid(
             row=0, column=0, sticky="w", pady=(0, px(6))
         )
@@ -672,7 +738,7 @@ class VideoDownloaderApp:
             show="headings",
             selectmode="browse",
             style="Formats.Treeview",
-            height=3,
+            height=2,
         )
         for key, title, width, anchor in (
             ("item", "VIDÉO / FORMAT", 520, "w"),
@@ -683,7 +749,7 @@ class VideoDownloaderApp:
             self.jobs_list.column(key, width=px(width), minwidth=px(80), anchor=anchor, stretch=key == "item")
         self.jobs_list.tag_configure("failed", foreground=COLORS["danger"])
         self.jobs_list.tag_configure("done", foreground=COLORS["accent"])
-        self.jobs_list.grid(row=1, column=0, sticky="nsew")
+        self.jobs_list.grid(row=1, column=0, sticky="ew")
         jobs_scrollbar = ttk.Scrollbar(jobs_card, orient="vertical", command=self.jobs_list.yview)
         jobs_scrollbar.grid(row=1, column=1, sticky="ns")
         self.jobs_list.configure(yscrollcommand=jobs_scrollbar.set)
@@ -763,6 +829,7 @@ class VideoDownloaderApp:
         if self.choices:
             self.format_list.selection_set("0")
             self.format_list.focus("0")
+            self.format_list.yview_moveto(0)
         self._update_buttons()
 
     def choose_directory(self) -> None:
@@ -872,6 +939,10 @@ class VideoDownloaderApp:
                 self.events.put(("job_error", (job_id, str(error))))
 
     def _refresh_job_status(self) -> None:
+        count = len(self.jobs)
+        self.jobs_count_var.set(
+            f"{count} téléchargement" + ("s" if count > 1 else "") if count else "Aucun téléchargement"
+        )
         queued_or_running = sum(job["state"] in ("En attente", "Téléchargement") for job in self.jobs.values())
         failures = sum(job["state"].startswith("Échec") for job in self.jobs.values())
         if queued_or_running:
