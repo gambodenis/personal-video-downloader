@@ -1,8 +1,10 @@
 import unittest
+from pathlib import Path
 
 from main import (
     build_choices,
     codec_name,
+    download_output_template,
     explain_download_error,
     format_duration,
     format_size,
@@ -48,6 +50,16 @@ class HelperTests(unittest.TestCase):
         runtimes = {"node": {"path": "node.exe"}}
         self.assertEqual(make_youtube_options("Aucune", runtimes)["js_runtimes"], runtimes)
         self.assertNotIn("js_runtimes", make_youtube_options("Aucune", {}))
+
+    def test_video_download_filename_includes_format_identifier(self) -> None:
+        template = download_output_template(Path("downloads"), {"kind": "video"})
+        self.assertIn("%(height)sp", template)
+        self.assertIn("%(format_id)s", template)
+
+    def test_audio_download_filename_includes_format_identifier(self) -> None:
+        template = download_output_template(Path("downloads"), {"kind": "audio"})
+        self.assertNotIn("%(height)sp", template)
+        self.assertIn("%(format_id)s", template)
 
 
 class ChoiceTests(unittest.TestCase):

@@ -8,6 +8,8 @@ Petite application de bureau Windows (Python + Tkinter) basée sur [yt-dlp](http
 
 - Liste claire des formats : qualité, résolution, conteneur, codec, IPS, audio et taille estimée.
 - Vue simplifiée (une ligne par résolution, H.264 privilégié) ou liste complète de tous les formats vidéo.
+- Téléchargements simultanés : sélectionnez plusieurs formats avec Ctrl/Maj, ou analysez un autre lien pendant qu'un téléchargement est en cours.
+- File de téléchargements avec progression et état par tâche (jusqu'à trois téléchargements actifs à la fois).
 - Fusion automatique vidéo + audio via FFmpeg pour les formats sans piste audio.
 - Mémorisation du dossier de téléchargement.
 - Utilisation optionnelle des cookies d'un navigateur (Chrome, Edge, Firefox, Brave) pour les vidéos qui renvoient une erreur 403.
@@ -42,10 +44,10 @@ py main.py
 
 ## Utilisation
 
-1. Collez le lien de la vidéo.
-2. Cliquez sur **Charger les formats**.
-3. Sélectionnez une ligne dans la liste.
-4. Cliquez sur **Télécharger la sélection**.
+1. Collez le lien de la vidéo et cliquez sur **Analyser**.
+2. Sélectionnez un ou plusieurs formats avec **Ctrl** ou **Maj**.
+3. Cliquez sur **Télécharger la sélection** : chaque choix apparaît dans la file et démarre dès qu'une place se libère.
+4. Pour une autre vidéo, remplacez le lien et cliquez sur **Analyser** sans attendre les téléchargements en cours.
 
 Le dossier de destination est mémorisé dans `%APPDATA%\VideoDownloader\config.json`. Par défaut, le dossier `Téléchargements` de l'utilisateur est utilisé.
 

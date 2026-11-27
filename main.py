@@ -38,6 +38,7 @@ BROWSERS = {
 # Ordre de priorité identique à yt-dlp.
 JS_RUNTIMES = ("deno", "node", "bun", "quickjs")
 CODEC_PRIORITY = {"H.264": 0, "VP9": 1, "AV1": 2}
+MAX_CONCURRENT_DOWNLOADS = 3
 COLUMNS = (
     ("quality", "QUALITÉ", 150, "w"),
     ("resolution", "RÉSOLUTION", 110, "center"),
@@ -293,6 +294,13 @@ def open_folder(path: Path) -> None:
         subprocess.Popen(["xdg-open", str(path)])
 
 
+def download_output_template(directory: Path, choice: dict[str, Any]) -> str:
+    filename = "%(title)s [%(format_id)s].%(ext)s"
+    if choice["kind"] != "audio":
+        filename = "%(title)s [%(height)sp] [%(format_id)s].%(ext)s"
+    return str(directory / filename)
+
+
 def enable_dpi_awareness() -> None:
     if sys.platform != "win32":
         return
@@ -322,9 +330,13 @@ class VideoDownloaderApp:
         self.root.geometry(f"{width}x{height}+{(screen_w - width) // 2}+{top}")
 
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
-        self.busy = False
+        self.fetching = False
         self.raw_formats: list[dict[str, Any]] = []
         self.choices: list[dict[str, Any]] = []
+        self.current_url = ""
+        self.next_job_id = 1
+        self.jobs: dict[int, dict[str, str]] = {}
+        self.download_slots = threading.BoundedSemaphore(MAX_CONCURRENT_DOWNLOADS)
         self.has_ffmpeg = shutil.which("ffmpeg") is not None
         self.js_runtimes = find_js_runtimes()
         self.config_path = get_config_path()
@@ -604,7 +616,7 @@ class VideoDownloaderApp:
             list_frame,
             columns=[col[0] for col in COLUMNS],
             show="headings",
-            selectmode="browse",
+            selectmode="extended",
             style="Formats.Treeview",
             height=6,
         )
@@ -628,23 +640,53 @@ class VideoDownloaderApp:
 
         # Barre d'action : statut, progression, boutons
         action = ttk.Frame(container, padding=(px(14), px(12)), style="Card.TFrame")
-        action.grid(row=3, column=0, sticky="ew", pady=(px(10), 0))
+        action.grid(row=4, column=0, sticky="ew", pady=(px(10), 0))
         action.columnconfigure(0, weight=1)
         ttk.Label(action, textvariable=self.status_var, style="Status.TLabel", wraplength=px(640), justify="left").grid(
             row=0, column=0, sticky="w"
         )
         ttk.Label(action, textvariable=self.progress_var, style="Progress.TLabel").grid(row=1, column=0, sticky="w")
-        self.progress = ttk.Progressbar(action, mode="determinate", maximum=100)
-        self.progress.grid(row=2, column=0, sticky="ew", pady=(px(6), 0), padx=(0, px(16)))
-
         buttons = ttk.Frame(action, style="Card.TFrame")
-        buttons.grid(row=0, column=1, rowspan=3, sticky="e")
+        buttons.grid(row=0, column=1, rowspan=2, sticky="e")
         self.open_button = ttk.Button(buttons, text="Ouvrir le dossier", command=self.open_output_folder)
         self.open_button.pack(side="left", padx=(0, px(8)))
         self.download_button = ttk.Button(
-            buttons, text="↓  Télécharger", style="Accent.TButton", command=self.download_selected, state="disabled"
+            buttons,
+            text="↓  Télécharger la sélection",
+            style="Accent.TButton",
+            command=self.download_selected,
+            state="disabled",
         )
         self.download_button.pack(side="left")
+
+        jobs_card = ttk.Frame(container, padding=px(14), style="Card.TFrame")
+        jobs_card.grid(row=3, column=0, sticky="ew", pady=(px(10), 0))
+        jobs_card.columnconfigure(0, weight=1)
+        jobs_card.rowconfigure(1, weight=1)
+        ttk.Label(jobs_card, text="TÉLÉCHARGEMENTS", style="Field.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, px(6))
+        )
+        self.jobs_list = ttk.Treeview(
+            jobs_card,
+            columns=("item", "progress", "state"),
+            show="headings",
+            selectmode="browse",
+            style="Formats.Treeview",
+            height=3,
+        )
+        for key, title, width, anchor in (
+            ("item", "VIDÉO / FORMAT", 520, "w"),
+            ("progress", "PROGRESSION", 130, "center"),
+            ("state", "ÉTAT", 220, "w"),
+        ):
+            self.jobs_list.heading(key, text=title, anchor=anchor)
+            self.jobs_list.column(key, width=px(width), minwidth=px(80), anchor=anchor, stretch=key == "item")
+        self.jobs_list.tag_configure("failed", foreground=COLORS["danger"])
+        self.jobs_list.tag_configure("done", foreground=COLORS["accent"])
+        self.jobs_list.grid(row=1, column=0, sticky="nsew")
+        jobs_scrollbar = ttk.Scrollbar(jobs_card, orient="vertical", command=self.jobs_list.yview)
+        jobs_scrollbar.grid(row=1, column=1, sticky="ns")
+        self.jobs_list.configure(yscrollcommand=jobs_scrollbar.set)
 
     def _show_environment_hints(self) -> None:
         hints = []
@@ -661,8 +703,7 @@ class VideoDownloaderApp:
                 "avec l’audio (winget install ffmpeg)."
             )
             style = "Warn.TLabel"
-        if not hints:
-            hints.append("Astuce : double-cliquez sur une ligne pour la télécharger directement.")
+        hints.append("Ctrl ou Maj + clic pour choisir plusieurs formats.")
         hints.append("Enregistrez uniquement les vidéos que vous êtes autorisé(e) à télécharger.")
         self.env_hint.configure(text="\n".join(hints), style=style)
 
@@ -671,42 +712,40 @@ class VideoDownloaderApp:
         return make_youtube_options(self.browser_var.get(), self.js_runtimes)
 
     def _update_buttons(self) -> None:
-        state = "disabled" if self.busy else "normal"
-        self.fetch_button.configure(state=state)
-        self.folder_button.configure(state=state)
-        can_download = not self.busy and bool(self.format_list.selection())
+        self.fetch_button.configure(state="disabled" if self.fetching else "normal")
+        self.folder_button.configure(state="normal")
+        can_download = not self.fetching and bool(self.format_list.selection())
         self.download_button.configure(state="normal" if can_download else "disabled")
         self.open_button.configure(state="normal")
 
-    def _set_busy(self, busy: bool) -> None:
-        self.busy = busy
-        self.root.configure(cursor="watch" if busy else "")
+    def _set_fetching(self, fetching: bool) -> None:
+        self.fetching = fetching
+        self.root.configure(cursor="watch" if fetching else "")
         self._update_buttons()
 
     def fetch_formats(self) -> None:
-        if self.busy:
+        if self.fetching:
             return
         url = self.url_var.get().strip()
         if not url:
             messagebox.showerror("Lien manquant", "Collez le lien de la vidéo.", parent=self.root)
             return
-        self._set_busy(True)
+        self._set_fetching(True)
         self.status_var.set("Analyse de la vidéo…")
-        self.progress_var.set("")
-        self.progress.configure(mode="indeterminate")
-        self.progress.start(12)
+        self.progress_var.set("Ctrl ou Maj + clic pour sélectionner plusieurs formats.")
         self.title_var.set("Analyse en cours…")
         self.meta_var.set(url)
         self.format_list.delete(*self.format_list.get_children())
         self.raw_formats = []
         self.choices = []
+        self.current_url = ""
         threading.Thread(target=self._fetch_worker, args=(url, self._youtube_options()), daemon=True).start()
 
     def _fetch_worker(self, url: str, options: dict[str, Any]) -> None:
         try:
             with yt_dlp.YoutubeDL(options) as downloader:
                 info = downloader.extract_info(url, download=False)
-            self.events.put(("formats", info))
+            self.events.put(("formats", (url, info)))
         except Exception as error:  # noqa: BLE001 - message affiché à l'utilisateur
             self.events.put(("fetch_error", str(error)))
 
@@ -756,68 +795,107 @@ class VideoDownloaderApp:
             messagebox.showerror("Dossier", f"Impossible d’ouvrir le dossier :\n{error}", parent=self.root)
 
     def download_selected(self) -> None:
-        if self.busy:
+        if self.fetching:
             return
         selected = self.format_list.selection()
         if not selected:
             messagebox.showinfo("Format requis", "Sélectionnez une qualité.", parent=self.root)
             return
-        choice = self.choices[int(selected[0])]
-        if choice.get("needs_ffmpeg") and not self.has_ffmpeg:
+        choices = [self.choices[int(item)] for item in selected]
+        if any(choice.get("needs_ffmpeg") for choice in choices) and not self.has_ffmpeg:
             proceed = messagebox.askyesno(
                 "FFmpeg requis",
-                "Ce format ne contient pas d’audio et FFmpeg n’est pas installé : "
+                "Au moins un de ces formats ne contient pas d’audio et FFmpeg n’est pas installé : "
                 "la vidéo et l’audio seront enregistrés séparément.\n\nContinuer ?",
                 parent=self.root,
             )
             if not proceed:
                 return
-        self._set_busy(True)
-        self.progress.stop()
-        self.progress.configure(mode="determinate", value=0)
-        self.progress_var.set("")
-        self.status_var.set(f"Téléchargement — {choice['quality'].strip('★♪ ')}…")
-        threading.Thread(
-            target=self._download_worker,
-            args=(self.url_var.get().strip(), choice, self.download_dir, self._youtube_options()),
-            daemon=True,
-        ).start()
+        for choice in choices:
+            job_id = self.next_job_id
+            self.next_job_id += 1
+            label = f"{self.title_var.get()} — {choice['quality'].strip('★♪ ')}"
+            self.jobs[job_id] = {"label": label, "state": "En attente", "progress": "0 %"}
+            self.jobs_list.insert(
+                "", "end", iid=str(job_id), values=(label, "0 %", "En attente")
+            )
+            threading.Thread(
+                target=self._download_worker,
+                args=(
+                    job_id,
+                    self.current_url,
+                    choice,
+                    self.download_dir,
+                    self._youtube_options(),
+                ),
+                daemon=True,
+            ).start()
+        self._refresh_job_status()
 
-    def _download_worker(self, url: str, choice: dict[str, Any], directory: Path, options: dict[str, Any]) -> None:
-        def progress_hook(data: dict[str, Any]) -> None:
-            if data.get("status") == "downloading":
-                total = data.get("total_bytes") or data.get("total_bytes_estimate")
-                downloaded = data.get("downloaded_bytes", 0)
-                percent = downloaded * 100 / total if total else 0
-                parts = [f"{percent:.1f} %"]
-                if total:
-                    parts.append(f"{format_size(downloaded)} / {format_size(total)}")
-                if data.get("speed"):
-                    parts.append(f"{format_size(data['speed'])}/s")
-                if data.get("eta") is not None:
-                    parts.append(f"reste {format_duration(data['eta']) or '0:00'}")
-                self.events.put(("progress", (percent, "  ·  ".join(parts))))
-            elif data.get("status") == "finished":
-                self.events.put(("progress", (100, "Fichier reçu, finalisation…")))
+    def _download_worker(
+        self, job_id: int, url: str, choice: dict[str, Any], directory: Path, options: dict[str, Any]
+    ) -> None:
+        with self.download_slots:
+            self.events.put(("job_started", job_id))
 
-        try:
-            directory.mkdir(parents=True, exist_ok=True)
-            options = {
-                **options,
-                "format": choice["selector"],
-                "outtmpl": str(directory / "%(title)s [%(height)sp].%(ext)s")
-                if choice["kind"] != "audio"
-                else str(directory / "%(title)s.%(ext)s"),
-                "progress_hooks": [progress_hook],
-                "windowsfilenames": True,
-            }
-            if choice.get("merge") and self.has_ffmpeg:
-                options["merge_output_format"] = choice["merge"]
-            with yt_dlp.YoutubeDL(options) as downloader:
-                downloader.download([url])
-            self.events.put(("download_done", directory))
-        except Exception as error:  # noqa: BLE001
-            self.events.put(("download_error", str(error)))
+            def progress_hook(data: dict[str, Any]) -> None:
+                if data.get("status") == "downloading":
+                    total = data.get("total_bytes") or data.get("total_bytes_estimate")
+                    downloaded = data.get("downloaded_bytes", 0)
+                    percent = downloaded * 100 / total if total else 0
+                    parts = [f"{percent:.1f} %"]
+                    if total:
+                        parts.append(f"{format_size(downloaded)} / {format_size(total)}")
+                    if data.get("speed"):
+                        parts.append(f"{format_size(data['speed'])}/s")
+                    if data.get("eta") is not None:
+                        parts.append(f"reste {format_duration(data['eta']) or '0:00'}")
+                    self.events.put(("job_progress", (job_id, percent, "  ·  ".join(parts))))
+                elif data.get("status") == "finished":
+                    self.events.put(("job_progress", (job_id, 100, "Fichier reçu, finalisation…")))
+
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+                options = {
+                    **options,
+                    "format": choice["selector"],
+                    "outtmpl": download_output_template(directory, choice),
+                    "progress_hooks": [progress_hook],
+                    "windowsfilenames": True,
+                }
+                if choice.get("merge") and self.has_ffmpeg:
+                    options["merge_output_format"] = choice["merge"]
+                with yt_dlp.YoutubeDL(options) as downloader:
+                    downloader.download([url])
+                self.events.put(("job_done", (job_id, directory)))
+            except Exception as error:  # noqa: BLE001
+                self.events.put(("job_error", (job_id, str(error))))
+
+    def _refresh_job_status(self) -> None:
+        queued_or_running = sum(job["state"] in ("En attente", "Téléchargement") for job in self.jobs.values())
+        failures = sum(job["state"].startswith("Échec") for job in self.jobs.values())
+        if queued_or_running:
+            self.status_var.set(
+                f"{queued_or_running} téléchargement(s) en cours ou en attente · "
+                f"{MAX_CONCURRENT_DOWNLOADS} simultanés maximum."
+            )
+        elif failures:
+            self.status_var.set(f"{failures} téléchargement(s) en échec — consultez la liste.")
+        elif self.jobs:
+            self.status_var.set("✓ Tous les téléchargements sont terminés.")
+
+    def _update_job(self, job_id: int, state: str, progress: str | None = None) -> None:
+        job = self.jobs.get(job_id)
+        if not job:
+            return
+        job["state"] = state
+        if progress is not None:
+            job["progress"] = progress
+        tags = ("failed",) if state.startswith("Échec") else ("done",) if state == "Terminé" else ()
+        self.jobs_list.item(
+            str(job_id), values=(job["label"], job["progress"], state), tags=tags
+        )
+        self._refresh_job_status()
 
     def _process_events(self) -> None:
         while True:
@@ -827,9 +905,8 @@ class VideoDownloaderApp:
                 break
 
             if event == "formats":
-                self.progress.stop()
-                self.progress.configure(mode="determinate", value=0)
-                info = payload
+                url, info = payload
+                self.current_url = url
                 self.raw_formats = info.get("formats") or []
                 self.title_var.set(info.get("title") or "Vidéo")
                 meta = [
@@ -838,33 +915,35 @@ class VideoDownloaderApp:
                     f"{info['view_count']:,} vues".replace(",", " ") if info.get("view_count") else "",
                 ]
                 self.meta_var.set("  ·  ".join(part for part in meta if part))
-                self._set_busy(False)
+                self._set_fetching(False)
                 self._refresh_choices()
                 count = sum(1 for c in self.choices if c["kind"] == "video")
-                self.status_var.set(
-                    f"{count} qualité(s) disponible(s). Sélectionnez-en une puis téléchargez."
-                    if self.choices
-                    else "Aucun format téléchargeable trouvé."
-                )
-            elif event == "progress":
-                value, text = payload
-                self.progress.configure(value=value)
-                self.progress_var.set(text)
-            elif event == "download_done":
-                self.last_output_dir = payload
-                self.progress.configure(value=100)
-                self.status_var.set("✓ Téléchargement terminé.")
-                self.progress_var.set(f"Enregistré dans {payload}")
-                self._set_busy(False)
-            elif event in ("fetch_error", "download_error"):
-                self.progress.stop()
-                self.progress.configure(mode="determinate", value=0)
-                if event == "fetch_error":
-                    self.title_var.set("Analyse impossible")
-                    self.meta_var.set("Vérifiez le lien ou essayez avec une session navigateur.")
+                if any(job["state"] in ("En attente", "Téléchargement") for job in self.jobs.values()):
+                    self._refresh_job_status()
+                else:
+                    self.status_var.set(
+                        f"{count} qualité(s) disponible(s). Sélectionnez-en une puis téléchargez."
+                        if self.choices
+                        else "Aucun format téléchargeable trouvé."
+                    )
+            elif event == "job_started":
+                self._update_job(payload, "Téléchargement")
+            elif event == "job_progress":
+                job_id, _percent, text = payload
+                self._update_job(job_id, "Téléchargement", text)
+            elif event == "job_done":
+                job_id, directory = payload
+                self.last_output_dir = directory
+                self._update_job(job_id, "Terminé", "100 %")
+            elif event == "fetch_error":
+                self.title_var.set("Analyse impossible")
+                self.meta_var.set("Vérifiez le lien ou essayez avec une session navigateur.")
                 self.status_var.set(explain_download_error(payload))
                 self.progress_var.set(str(payload).splitlines()[0][:160] if payload else "")
-                self._set_busy(False)
+                self._set_fetching(False)
+            elif event == "job_error":
+                job_id, error = payload
+                self._update_job(job_id, f"Échec : {explain_download_error(error)}")
         self.root.after(100, self._process_events)
 
 
